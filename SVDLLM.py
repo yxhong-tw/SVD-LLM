@@ -132,68 +132,100 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
     attention_masks = cache['attention_mask']
     if "opt" not in model_name:
         position_ids = cache['position_ids']
+
     profiling_mat = {}
     for i in tqdm(range(len(layers))):
         layer_profile = {}
+
         layer = layers[i].to(dev)
         subset = find_layers(layer)        
+
+        # Calculate raw_scaling_diag_matrix.
         def hook(module, input, output):
             inp = input[0].detach().float()
+
             if inp.dim() == 2:  # for opt
                 inp = inp.unsqueeze(0)
+
             adds = torch.matmul(inp.transpose(1,2), inp)
             adds_sum = torch.sum(adds, dim=0)
+
             module.scaling_diag_matrix += adds_sum
+
             del inp, adds, adds_sum, output
             torch.cuda.empty_cache()
+        # -----
+
         handles = []
         for name in subset:
             subset[name].scaling_diag_matrix = 0
             handles.append(subset[name].register_forward_hook(hook))
+
         for j in range(inps.shape[0]):
             if "opt" not in model_name:
                 outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks[j].unsqueeze(0).to(dev), position_ids=position_ids[j].unsqueeze(0).to(dev))[0]
             else:
                 outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks[j].unsqueeze(0).to(dev))[0]
+
         for h in handles:
             h.remove()
+
         layer = layer.cpu()
+
         for name in subset:
             subset[name].scaling_diag_matrix = subset[name].scaling_diag_matrix.cpu()
+
         torch.cuda.empty_cache()
+
         for name in subset:
             raw_scaling_diag_matrix = subset[name].scaling_diag_matrix.double().to(dev)
+
+            # Do Cholesky decomposition on raw_scaling_diag_matrix to get scaling_diag_matrix.
             try:
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
             except Exception as e:
                 print("Warning: eigen scaling_diag_matrix is not positive!")
+
                 eigenvalues = torch.linalg.eigvalsh(raw_scaling_diag_matrix)
+
                 raw_scaling_diag_matrix += (- eigenvalues[0] + 1e-6) * torch.eye(raw_scaling_diag_matrix.shape[0]).to(dev)
+
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
+
                 eigenvalues = None
                 del eigenvalues
+
             layer_profile[name] = scaling_diag_matrix.cpu()
+            # -----
+
             scaling_diag_matrix = raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix = None
             del scaling_diag_matrix, raw_scaling_diag_matrix, subset[name].raw_scaling_diag_matrix
             torch.cuda.empty_cache()
+
         layers[i] = layer.cpu()
         profiling_mat[i] = layer_profile
         inps = outs
+
         torch.cuda.empty_cache()
+
     return profiling_mat
      
  
 @torch.no_grad()
 def whitening(model_name, model, profiling_mat, ratio, dev):
     model.eval()
+
     if 'opt' in model_name:
         layers = model.model.decoder.layers
     else:
         layers = model.model.layers
+
     print("Start SVD decomposition after whitening...")
+
     for i in tqdm(range(len(layers))):
         layer = layers[i]
         subset = find_layers(layer)
+
         #### Replace Attn, MLP ####
         if "llama" in model_name or "vicuna" in model_name:
             svd_attn = SVD_LlamaAttention(config=model.config, ratio=ratio)
@@ -203,30 +235,38 @@ def whitening(model_name, model, profiling_mat, ratio, dev):
             svd_mlp = SVD_MistralMLP(config=model.config, ratio=ratio)
         elif 'opt' in model_name:
             svd_decoder = SVDOPTDecoderLayer(model.config, ratio=ratio)
+
         #### Replace Attn, MLP ####
         for name in subset:
             W = subset[name].weight.data.float().to(dev)
             dtype = W.dtype
             scaling_diag_matrix = profiling_mat[i][name].to(dev)
+
             try:
                 scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
             except Exception as e:
                 print("Warning: scaling_diag_matrix is not full rank!")
                 scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(dev)
                 scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
+
             scaling_diag_matrix = scaling_diag_matrix.float()
             scaling_matrix_inv = scaling_matrix_inv.float()
+
             W_scale = torch.matmul(W, scaling_diag_matrix)
             U, S, VT = torch.linalg.svd(W_scale, full_matrices=False)
+
             num_s_after_trunc = int(W.shape[0] * W.shape[1] * ratio / (W.shape[0] + W.shape[1]))
+
             truc_s = S[:num_s_after_trunc]
             truc_u = U[:, :num_s_after_trunc]
             truc_v = torch.matmul(VT[:num_s_after_trunc, :], scaling_matrix_inv)
             truc_sigma = torch.diag(truc_s)
+
             #### Replace Attn, MLP ####
             sqrtSigma = torch.sqrt(truc_sigma)
             svd_u = torch.matmul(truc_u, sqrtSigma).cpu().to(dtype)
             svd_v = torch.matmul(sqrtSigma, truc_v).cpu().to(dtype)
+
             if 'opt' in model_name:
                 if "q_proj" in name:
                     svd_decoder.self_attn.q_u_proj.weight.data = svd_u

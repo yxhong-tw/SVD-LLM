@@ -32,22 +32,36 @@ def get_calib_train_data(name, tokenizer, nsamples, seqlen=2048, seed=3, batch_s
         tot_text = "\n\n".join(traindata["text"])
     else:
         raise NotImplementedError
+    print(tot_text)
+    input()
     traindataset = []
     for s in range(nsamples):
         i = random.randint(0, len(tot_text) - seqlen - 1)
         j = i + seqlen * 10
+        print(i, j)
+        input()
         trainenc = tokenizer(tot_text[i:j], return_tensors="pt")
+        print(trainenc.input_ids.shape)
+        input()
         if trainenc.input_ids.shape[1] < seqlen:
             s = s - 1
             continue
         if s % batch_size == 0:
+            print('a')
             if s != 0:
+                print('b')
+                print(inp)
+                print(inp.shape)
                 attention_mask = torch.ones_like(inp)
                 traindataset.append({"input_ids": inp, "attention_mask": attention_mask})
             inp = trainenc.input_ids[:, :seqlen]
         else:
+            print('c')
             inp = torch.cat((inp, trainenc.input_ids[:, :seqlen]), dim=0)
-    torch.save(traindataset, cache_file)
+        print(inp)
+        print(inp.shape)
+        input()
+    # torch.save(traindataset, cache_file)
     return traindataset
 
 
