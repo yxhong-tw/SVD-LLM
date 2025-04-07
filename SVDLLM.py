@@ -20,74 +20,77 @@ sys.path.append(current_path)
 
 
 
-@torch.no_grad()
-def profle_svdllm(name, model, calib_loader, dev):
-    if "llama" in name or "mistral" in name or "vicuna" in name:
-        layers = model.model.layers
-    elif "opt" in name:
-        layers = model.model.decoder.layers
-    model = model.to(dev)
-    print("Start obtaining the whitening matrix...")
-    def hook(module, input, output):
-        inp = input[0].detach().float()
-        if inp.dim() == 2:   # for opt
-            inp = inp.unsqueeze(0)
-        adds = torch.matmul(inp.transpose(1,2), inp)
-        adds_sum = torch.sum(adds, dim=0)
-        module.raw_scaling_diag_matrix += adds_sum
-        del inp, adds, adds_sum
-        torch.cuda.empty_cache()
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Linear):
-            module.raw_scaling_diag_matrix = 0
-            module.register_forward_hook(hook)
-    for batch in tqdm(calib_loader):
-        batch = {k: v.to(dev) for k, v in batch.items()}
-        model(**batch)
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Linear):
-            module._forward_hooks.clear()
-    torch.cuda.empty_cache()
-    model = model.cpu()
-    for i in range(len(layers)):
-        subset = find_layers(layers[i])
-        for name in subset:
-            subset[name].raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix.cpu()
-    profiling_mat = {}
-    print("Start Cholesky Decomposition...")
-    for i in tqdm(range(len(layers))):
-        layer_profile = {}
-        subset = find_layers(layers[i])
-        for name in subset:
-            raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix.double().to(dev)
-            try:
-                scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
-            except Exception as e:
-                print("Warning: eigen scaling_diag_matrix is not positive!")
-                eigenvalues = torch.linalg.eigvalsh(raw_scaling_diag_matrix)
-                raw_scaling_diag_matrix += (- eigenvalues[0] + 1e-6) * torch.eye(raw_scaling_diag_matrix.shape[0]).to(dev)
-                scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
-                eigenvalues = None
-                del eigenvalues
-            layer_profile[name] = scaling_diag_matrix.cpu()
-            scaling_diag_matrix = raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix = None
-            del scaling_diag_matrix, raw_scaling_diag_matrix, subset[name].raw_scaling_diag_matrix
-            torch.cuda.empty_cache()
-        profiling_mat[i] = layer_profile
-    return profiling_mat
+# @torch.no_grad()
+# def profle_svdllm(name, model, calib_loader, dev):
+#     if "llama" in name or "mistral" in name or "vicuna" in name:
+#         layers = model.model.layers
+#     elif "opt" in name:
+#         layers = model.model.decoder.layers
+#     model = model.to(dev)
+#     print("Start obtaining the whitening matrix...")
+#     def hook(module, input, output):
+#         inp = input[0].detach().float()
+#         if inp.dim() == 2:   # for opt
+#             inp = inp.unsqueeze(0)
+#         adds = torch.matmul(inp.transpose(1,2), inp)
+#         adds_sum = torch.sum(adds, dim=0)
+#         module.raw_scaling_diag_matrix += adds_sum
+#         del inp, adds, adds_sum
+#         torch.cuda.empty_cache()
+#     for name, module in model.named_modules():
+#         if isinstance(module, nn.Linear):
+#             module.raw_scaling_diag_matrix = 0
+#             module.register_forward_hook(hook)
+#     for batch in tqdm(calib_loader):
+#         batch = {k: v.to(dev) for k, v in batch.items()}
+#         model(**batch)
+#     for name, module in model.named_modules():
+#         if isinstance(module, nn.Linear):
+#             module._forward_hooks.clear()
+#     torch.cuda.empty_cache()
+#     model = model.cpu()
+#     for i in range(len(layers)):
+#         subset = find_layers(layers[i])
+#         for name in subset:
+#             subset[name].raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix.cpu()
+#     profiling_mat = {}
+#     print("Start Cholesky Decomposition...")
+#     for i in tqdm(range(len(layers))):
+#         layer_profile = {}
+#         subset = find_layers(layers[i])
+#         for name in subset:
+#             raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix.double().to(dev)
+#             try:
+#                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
+#             except Exception as e:
+#                 print("Warning: eigen scaling_diag_matrix is not positive!")
+#                 eigenvalues = torch.linalg.eigvalsh(raw_scaling_diag_matrix)
+#                 raw_scaling_diag_matrix += (- eigenvalues[0] + 1e-6) * torch.eye(raw_scaling_diag_matrix.shape[0]).to(dev)
+#                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
+#                 eigenvalues = None
+#                 del eigenvalues
+#             layer_profile[name] = scaling_diag_matrix.cpu()
+#             scaling_diag_matrix = raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix = None
+#             del scaling_diag_matrix, raw_scaling_diag_matrix, subset[name].raw_scaling_diag_matrix
+#             torch.cuda.empty_cache()
+#         profiling_mat[i] = layer_profile
+#     return profiling_mat
         
 
 @torch.no_grad()
 def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
     if "opt" in model_name:
-        layers = model.model.decoder.layers
-        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(dev)
-        model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
+        # layers = model.model.decoder.layers
+        # model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
+        # model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(dev)
+        # model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
+        pass
     else:
         layers = model.model.layers
         model.model.embed_tokens = model.model.embed_tokens.to(dev)
         model.model.norm = model.model.norm.to(dev)
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
+
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -102,6 +105,9 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp.cpu()
             cache['i'] += 1
+            # print(inp)
+            # print(kwargs)
+            # input()
             if cache['attention_mask'] is None:
                 cache['attention_mask'] = kwargs['attention_mask'].cpu()
                 if "opt" not in model_name:
@@ -115,18 +121,27 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
     for batch in calib_loader:
         try:
             batch = {k: v.to(dev) for k, v in batch.items()}
-            model(**batch)
+            # print(batch)
+            # print(batch['attention_mask'])
+            # input()
+            model(
+                **batch,
+                output_attentions=True,
+            )
         except ValueError:
             pass
     layers[0] = layers[0].module
     layers[0] = layers[0].cpu()
     if "opt" in model_name:
-        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
-        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.cpu()
-        model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
+        # model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
+        # model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.cpu()
+        # model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
+        pass
     else:  
         model.model.embed_tokens = model.model.embed_tokens.cpu()
         model.model.norm = model.model.norm.cpu()
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+
     torch.cuda.empty_cache()
     outs = torch.zeros_like(inps)
     attention_masks = cache['attention_mask']
@@ -137,6 +152,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         layer_profile = {}
         layer = layers[i].to(dev)
         subset = find_layers(layer)        
+
+        # Calculate raw_scaling_diag_matrix.
         def hook(module, input, output):
             inp = input[0].detach().float()
             if inp.dim() == 2:  # for opt
@@ -146,6 +163,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
             module.scaling_diag_matrix += adds_sum
             del inp, adds, adds_sum, output
             torch.cuda.empty_cache()
+        # -----
+
         handles = []
         for name in subset:
             subset[name].scaling_diag_matrix = 0
@@ -153,8 +172,9 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         for j in range(inps.shape[0]):
             if "opt" not in model_name:
                 outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks[j].unsqueeze(0).to(dev), position_ids=position_ids[j].unsqueeze(0).to(dev))[0]
-            else:
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks[j].unsqueeze(0).to(dev))[0]
+            # else:
+            #     outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks[j].unsqueeze(0).to(dev))[0]
+
         for h in handles:
             h.remove()
         layer = layer.cpu()
@@ -163,6 +183,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         torch.cuda.empty_cache()
         for name in subset:
             raw_scaling_diag_matrix = subset[name].scaling_diag_matrix.double().to(dev)
+
+            # Do Cholesky decomposition on raw_scaling_diag_matrix to get scaling_diag_matrix.
             try:
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
             except Exception as e:
@@ -173,6 +195,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
                 eigenvalues = None
                 del eigenvalues
             layer_profile[name] = scaling_diag_matrix.cpu()
+            # -----
+
             scaling_diag_matrix = raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix = None
             del scaling_diag_matrix, raw_scaling_diag_matrix, subset[name].raw_scaling_diag_matrix
             torch.cuda.empty_cache()
@@ -195,8 +219,10 @@ def whitening(model_name, model, profiling_mat, ratio, dev):
         layer = layers[i]
         subset = find_layers(layer)
         #### Replace Attn, MLP ####
-        if "llama" in model_name or "vicuna" in model_name:
-            svd_attn = SVD_LlamaAttention(config=model.config, ratio=ratio)
+        if "llama" in model_name or \
+            'Llama' in model_name or \
+                "vicuna" in model_name:
+            # svd_attn = SVD_LlamaAttention(config=model.config, ratio=ratio)
             svd_mlp = SVD_LlamaMLP(hidden_size=layer.hidden_size, intermediate_size=model.config.intermediate_size, hidden_act=model.config.hidden_act, ratio=ratio)
         elif "mistral" in model_name:
             svd_attn = SVD_MistralAttention(config=model.config, ratio=ratio)
@@ -205,6 +231,12 @@ def whitening(model_name, model, profiling_mat, ratio, dev):
             svd_decoder = SVDOPTDecoderLayer(model.config, ratio=ratio)
         #### Replace Attn, MLP ####
         for name in subset:
+            if 'q_proj' in name or \
+                'k_proj' in name or \
+                    'v_proj' in name or \
+                        'o_proj' in name:
+                continue
+
             W = subset[name].weight.data.float().to(dev)
             dtype = W.dtype
             scaling_diag_matrix = profiling_mat[i][name].to(dev)
