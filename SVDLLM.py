@@ -88,6 +88,7 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         layers = model.model.layers
         model.model.embed_tokens = model.model.embed_tokens.to(dev)
         model.model.norm = model.model.norm.to(dev)
+        # model.model.rotary_emb = model.model.rotary_emb.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -115,7 +116,9 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
     for batch in calib_loader:
         try:
             batch = {k: v.to(dev) for k, v in batch.items()}
-            model(**batch)
+            model(**batch,
+                # output_attentions=True,
+            )
         except ValueError:
             pass
     layers[0] = layers[0].module
@@ -127,6 +130,7 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
     else:  
         model.model.embed_tokens = model.model.embed_tokens.cpu()
         model.model.norm = model.model.norm.cpu()
+        # model.model.rotary_emb = model.model.rotary_emb.cpu()
     torch.cuda.empty_cache()
     outs = torch.zeros_like(inps)
     attention_masks = cache['attention_mask']
@@ -137,6 +141,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         layer_profile = {}
         layer = layers[i].to(dev)
         subset = find_layers(layer)        
+
+        # Calculate raw_scaling_diag_matrix.
         def hook(module, input, output):
             inp = input[0].detach().float()
             if inp.dim() == 2:  # for opt
@@ -146,6 +152,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
             module.scaling_diag_matrix += adds_sum
             del inp, adds, adds_sum, output
             torch.cuda.empty_cache()
+        # -----
+
         handles = []
         for name in subset:
             subset[name].scaling_diag_matrix = 0
@@ -163,6 +171,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         torch.cuda.empty_cache()
         for name in subset:
             raw_scaling_diag_matrix = subset[name].scaling_diag_matrix.double().to(dev)
+
+            # Do Cholesky decomposition on raw_scaling_diag_matrix to get scaling_diag_matrix.
             try:
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix)
             except Exception as e:
@@ -173,6 +183,8 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
                 eigenvalues = None
                 del eigenvalues
             layer_profile[name] = scaling_diag_matrix.cpu()
+            # -----
+
             scaling_diag_matrix = raw_scaling_diag_matrix = subset[name].raw_scaling_diag_matrix = None
             del scaling_diag_matrix, raw_scaling_diag_matrix, subset[name].raw_scaling_diag_matrix
             torch.cuda.empty_cache()
@@ -195,7 +207,9 @@ def whitening(model_name, model, profiling_mat, ratio, dev):
         layer = layers[i]
         subset = find_layers(layer)
         #### Replace Attn, MLP ####
-        if "llama" in model_name or "vicuna" in model_name:
+        if "llama" in model_name or \
+            'Llama' in model_name or \
+                "vicuna" in model_name:
             svd_attn = SVD_LlamaAttention(config=model.config, ratio=ratio)
             svd_mlp = SVD_LlamaMLP(hidden_size=layer.hidden_size, intermediate_size=model.config.intermediate_size, hidden_act=model.config.hidden_act, ratio=ratio)
         elif "mistral" in model_name:
@@ -205,6 +219,11 @@ def whitening(model_name, model, profiling_mat, ratio, dev):
             svd_decoder = SVDOPTDecoderLayer(model.config, ratio=ratio)
         #### Replace Attn, MLP ####
         for name in subset:
+            # if 'q_proj' in name or \
+            #     'k_proj' in name or \
+            #         'v_proj' in name or \
+            #             'o_proj' in name:
+            #     continue
             W = subset[name].weight.data.float().to(dev)
             dtype = W.dtype
             scaling_diag_matrix = profiling_mat[i][name].to(dev)

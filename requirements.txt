@@ -6,4 +6,6 @@ transformers==4.35.2
 sentencepiece==0.1.99
 matplotlib==3.4.3
 evaluate
-accelerate
+accelerate==0.28.0
+protobuf
+importlib_metadata
